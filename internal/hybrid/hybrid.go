@@ -3,249 +3,383 @@ package hybrid
 import (
 	"context"
 	"fmt"
-	"os"
-	"sort"
+	"runtime"
 	"strings"
+	"sync"
 
+	"github.com/toricodesthings/PDF-to-Text-Extraction-Service/internal/config"
 	"github.com/toricodesthings/PDF-to-Text-Extraction-Service/internal/extractor"
 	"github.com/toricodesthings/PDF-to-Text-Extraction-Service/internal/format"
 	"github.com/toricodesthings/PDF-to-Text-Extraction-Service/internal/ocr"
 	"github.com/toricodesthings/PDF-to-Text-Extraction-Service/internal/quality"
 	"github.com/toricodesthings/PDF-to-Text-Extraction-Service/internal/types"
+	"golang.org/x/sync/semaphore"
 )
 
-type PageEval struct {
-	Page     int
-	Text     string
-	Decision quality.Decision
+type Processor struct {
+	cfg config.Config
+
+	// Extractor config (your PageCount signature requires this)
+	extractCfg extractor.ExtractorConfig
 }
 
-func WithDefaults(o types.HybridProcessorOptions) types.HybridProcessorOptions {
-	if o.MinWordsThreshold == 0 {
-		o.MinWordsThreshold = 10
+func New(cfg config.Config) *Processor {
+	return &Processor{
+		cfg: cfg,
+		extractCfg: extractor.ExtractorConfig{
+			PDFInfoTimeout:      cfg.PDFInfoTimeout,
+			PDFToTextTimeout:    cfg.PDFToTextTimeout,
+			PDFToTextAllTimeout: cfg.PDFToTextAllTimeout,
+		},
 	}
-	if o.PageSeparator == "" {
-		o.PageSeparator = "\n\n---\n\n"
-	}
-	if o.OCRTriggerRatio == 0 {
-		o.OCRTriggerRatio = 0.3
-	}
-	// default true
-	if !o.IncludePageNumbers {
-		o.IncludePageNumbers = true
-	}
-	return o
 }
 
-func ProcessHybrid(ctx context.Context, presignedURL, pdfPath string, opts types.HybridProcessorOptions) (types.HybridExtractionResult, error) {
-	opts = WithDefaults(opts)
+// ApplyDefaults merges server defaults into request options without overwriting valid user choices.
+func (p *Processor) ApplyDefaults(opts types.HybridProcessorOptions) types.HybridProcessorOptions {
+	if opts.MinWordsThreshold <= 0 {
+		opts.MinWordsThreshold = p.cfg.DefaultMinWordsThreshold
+	}
+	if opts.PageSeparator == "" {
+		opts.PageSeparator = p.cfg.DefaultPageSeparator
+	}
+	if opts.OCRTriggerRatio <= 0 {
+		opts.OCRTriggerRatio = p.cfg.DefaultOCRTriggerRatio
+	}
+	if opts.OCRModel == nil {
+		m := p.cfg.DefaultOCRModel
+		opts.OCRModel = &m
+	}
+	if opts.PreviewMaxPages <= 0 {
+		opts.PreviewMaxPages = p.cfg.DefaultPreviewMaxPages
+	}
+	if opts.PreviewMaxChars <= 0 {
+		opts.PreviewMaxChars = p.cfg.DefaultPreviewMaxChars
+	}
+	return opts
+}
 
-	totalPages, err := extractor.PageCount(ctx, pdfPath)
-	if err != nil || totalPages <= 0 {
-		return fail(fmt.Sprintf("page count failed: %v", err)), nil
+func (p *Processor) ProcessHybrid(
+	ctx context.Context,
+	presignedURL, pdfPath string,
+	opts types.HybridProcessorOptions,
+) (types.HybridExtractionResult, error) {
+	result := types.HybridExtractionResult{
+		Success: false,
+		Pages:   []types.PageExtractionResult{},
 	}
 
-	selected := normalizePages(opts.Pages, totalPages)
-	pagesToInclude := selected
-	if pagesToInclude == nil {
-		pagesToInclude = make([]int, totalPages)
-		for i := 1; i <= totalPages; i++ {
-			pagesToInclude[i-1] = i
+	// Your compiler says PageCount wants ExtractorConfig
+	totalPages, err := extractor.PageCount(ctx, pdfPath, p.extractCfg)
+	if err != nil {
+		msg := fmt.Sprintf("page count failed: %v", err)
+		result.Error = &msg
+		return result, err
+	}
+	result.TotalPages = totalPages
+
+	if totalPages == 0 {
+		msg := "PDF has no pages"
+		result.Error = &msg
+		return result, fmt.Errorf(msg)
+	}
+
+	// Determine pages to process
+	pages := opts.Pages
+	if len(pages) == 0 {
+		pages = make([]int, totalPages)
+		for i := range pages {
+			pages[i] = i + 1
 		}
 	}
 
-	// 1) text-layer per page + quality decision
-	evals := make([]PageEval, 0, len(pagesToInclude))
-	needsOCR := make([]int, 0)
+	// Phase 1: Extract text from all pages in parallel
+	pageResults := p.extractPagesParallel(ctx, pdfPath, pages, opts.MinWordsThreshold)
 
-	for _, p := range pagesToInclude {
-		raw, _ := extractor.TextForPage(ctx, pdfPath, p)
-		raw = cleanText(raw)
-		d := quality.Score(raw, opts.MinWordsThreshold)
+	// Phase 2: Analyze quality
+	needsOCRPages := make([]int, 0)
+	for _, pr := range pageResults {
+		result.Pages = append(result.Pages, pr)
 
-		evals = append(evals, PageEval{Page: p, Text: raw, Decision: d})
-		if d.NeedsOCR {
-			needsOCR = append(needsOCR, p)
-		}
-	}
-
-	ocrRatio := 0.0
-	if len(pagesToInclude) > 0 {
-		ocrRatio = float64(len(needsOCR)) / float64(len(pagesToInclude))
-	}
-
-	// 2) Decide OCR strategy:
-	// - If too many pages need OCR -> OCR all selected pages (or whole doc)
-	// - Else OCR only those pages
-	var pagesForOCR0 []int
-	if len(needsOCR) > 0 {
-		if ocrRatio > opts.OCRTriggerRatio {
-			// OCR everything we’re returning (selected pages)
-			pagesForOCR0 = toZeroIndexed(pagesToInclude)
+		if pr.Method == "text-layer" {
+			result.TextLayerPages++
 		} else {
-			// OCR only bad pages (best case)
-			pagesForOCR0 = toZeroIndexed(needsOCR)
+			needsOCRPages = append(needsOCRPages, pr.PageNumber)
 		}
 	}
 
-	// 3) If OCR needed, call Mistral once, merge results
-	ocrMarkdownByPage := map[int]string{}
-	if len(pagesForOCR0) > 0 {
-		model := "mistral-ocr-latest"
-		if opts.OCRModel != nil && *opts.OCRModel != "" {
-			model = *opts.OCRModel
+	// Decide OCR strategy
+	ocrRatio := float64(len(needsOCRPages)) / float64(len(pages))
+	shouldDoFullOCR := ocrRatio >= opts.OCRTriggerRatio
+
+	// Phase 3: Execute OCR if needed
+	if len(needsOCRPages) > 0 {
+		var ocrPages []int
+		if shouldDoFullOCR {
+			ocrPages = pages
+		} else {
+			ocrPages = needsOCRPages
 		}
-		resp, err := ocr.RunMistralOCR(ctx, presignedURL, model, pagesForOCR0, opts.ExtractHeader, opts.ExtractFooter)
+
+		ocrResults, err := runOCRBatch(ctx, presignedURL, ocrPages, opts)
 		if err != nil {
-			return fail("ocr failed: " + err.Error()), nil
-		}
-		for _, pg := range resp.Pages {
-			oneIndexed := pg.Index + 1
-			ocrMarkdownByPage[oneIndexed] = cleanOCR(pg.Markdown)
-		}
-	}
-
-	// 4) Build final pages in order
-	out := make([]types.PageExtractionResult, 0, len(pagesToInclude))
-	ocrCount := 0
-	for _, ev := range evals {
-		if md, ok := ocrMarkdownByPage[ev.Page]; ok && strings.TrimSpace(md) != "" {
-			out = append(out, types.PageExtractionResult{
-				PageNumber: ev.Page,
-				Text:       md,
-				Method:     "ocr",
-				WordCount:  quality.CountWords(md),
-			})
-			ocrCount++
+			msg := fmt.Sprintf("OCR failed: %v", err)
+			result.Error = &msg
 		} else {
-			out = append(out, types.PageExtractionResult{
-				PageNumber: ev.Page,
-				Text:       ev.Text,
-				Method:     "text-layer",
-				WordCount:  ev.Decision.WordCount,
-			})
+			mergeOCRResults(&result, ocrResults, shouldDoFullOCR)
 		}
 	}
 
-	combined := format.Combine(out, opts.PageSeparator, opts.IncludePageNumbers)
+	// Phase 4: Combine and format
+	result.Text = format.Combine(result.Pages, opts.PageSeparator, opts.IncludePageNumbers)
+	result.OCRPages = countOCRPages(result.Pages)
+	result.TextLayerPages = len(result.Pages) - result.OCRPages
+	result.CostSavingsPercent = calculateSavings(result.TextLayerPages, result.TotalPages)
+	result.Success = true
 
-	// Savings estimate: proportion of pages not OCR’d
-	savings := 0
-	if len(out) > 0 {
-		savings = int((1.0 - float64(ocrCount)/float64(len(out))) * 100.0)
-	}
-
-	return types.HybridExtractionResult{
-		Success:            true,
-		Text:               combined,
-		Pages:              out,
-		TotalPages:         totalPages,
-		TextLayerPages:     len(out) - ocrCount,
-		OCRPages:           ocrCount,
-		CostSavingsPercent: savings,
-	}, nil
+	return result, nil
 }
 
-func ProcessPreview(ctx context.Context, pdfPath string, opts types.HybridProcessorOptions) types.PreviewResult {
-	opts = WithDefaults(opts)
+func (p *Processor) ProcessPreview(ctx context.Context, pdfPath string, opts types.HybridProcessorOptions) types.PreviewResult {
+	result := types.PreviewResult{Success: false}
 
-	totalPages, err := extractor.PageCount(ctx, pdfPath)
-	if err != nil || totalPages <= 0 {
-		msg := "page count failed"
-		return types.PreviewResult{Success: false, NeedsOCR: true, Error: &msg}
+	// Your compiler says PageCount wants ExtractorConfig
+	totalPages, err := extractor.PageCount(ctx, pdfPath, p.extractCfg)
+	if err != nil {
+		msg := fmt.Sprintf("page count: %v", err)
+		result.Error = &msg
+		return result
+	}
+	result.TotalPages = totalPages
+
+	previewPages := opts.PreviewMaxPages
+	if previewPages > totalPages {
+		previewPages = totalPages
+	}
+	if previewPages < 1 {
+		previewPages = 1
 	}
 
-	selected := normalizePages(opts.Pages, totalPages)
-	pagesToInclude := selected
-	if pagesToInclude == nil {
-		pagesToInclude = make([]int, totalPages)
-		for i := 1; i <= totalPages; i++ {
-			pagesToInclude[i-1] = i
-		}
+	pages := make([]int, previewPages)
+	for i := range pages {
+		pages[i] = i + 1
 	}
 
-	needs := 0
-	textLayerPages := 0
-	for _, p := range pagesToInclude {
-		raw, _ := extractor.TextForPage(ctx, pdfPath, p)
-		raw = cleanText(raw)
-		d := quality.Score(raw, opts.MinWordsThreshold)
-		if d.NeedsOCR {
-			needs++
+	pageResults := p.extractPagesParallel(ctx, pdfPath, pages, opts.MinWordsThreshold)
+
+	needsOCR := 0
+	totalWords := 0
+	var textParts []string
+
+	for _, pr := range pageResults {
+		totalWords += pr.WordCount
+		if pr.Method == "needs-ocr" {
+			needsOCR++
 		} else {
-			textLayerPages++
+			result.TextLayerPages++
+			textParts = append(textParts, pr.Text)
 		}
 	}
-	ratio := 0.0
-	if len(pagesToInclude) > 0 {
-		ratio = float64(needs) / float64(len(pagesToInclude))
+
+	result.WordCount = totalWords
+	threshold := p.cfg.DefaultPreviewNeedsOCRRatio
+	if threshold <= 0 {
+		threshold = 0.25
+	}
+	result.NeedsOCR = float64(needsOCR)/float64(len(pages)) > threshold
+
+	combined := strings.Join(textParts, "\n\n")
+	if len(combined) > opts.PreviewMaxChars {
+		combined = combined[:opts.PreviewMaxChars] + "..."
+	}
+	result.Text = combined
+	result.Success = true
+
+	return result
+}
+
+// ---------- Internal ----------
+
+func (p *Processor) extractPagesParallel(ctx context.Context, pdfPath string, pages []int, minWords int) []types.PageExtractionResult {
+	results := make([]types.PageExtractionResult, len(pages))
+
+	workers := runtime.NumCPU()
+	if p.cfg.MaxPageWorkers > 0 && workers > p.cfg.MaxPageWorkers {
+		workers = p.cfg.MaxPageWorkers
+	}
+	if workers > len(pages) {
+		workers = len(pages)
+	}
+	if workers < 1 {
+		workers = 1
 	}
 
-	// Preview only returns “needs OCR?” without OCR call
-	return types.PreviewResult{
-		Success:        true,
-		NeedsOCR:       needs > 0 && ratio > opts.OCRTriggerRatio,
-		Text:           "",
-		WordCount:      0,
-		TotalPages:     totalPages,
-		TextLayerPages: textLayerPages,
+	sem := semaphore.NewWeighted(int64(workers))
+	var wg sync.WaitGroup
+
+	for i, pageNum := range pages {
+		wg.Add(1)
+		go func(idx, page int) {
+			defer wg.Done()
+
+			if err := sem.Acquire(ctx, 1); err != nil {
+				results[idx] = types.PageExtractionResult{
+					PageNumber: page,
+					Method:     "needs-ocr",
+				}
+				return
+			}
+			defer sem.Release(1)
+
+			results[idx] = p.extractSinglePage(ctx, pdfPath, page, minWords)
+		}(i, pageNum)
+	}
+
+	wg.Wait()
+	return results
+}
+
+func (p *Processor) extractSinglePage(ctx context.Context, pdfPath string, pageNum, minWords int) types.PageExtractionResult {
+	result := types.PageExtractionResult{
+		PageNumber: pageNum,
+		Method:     "text-layer",
+	}
+
+	// IMPORTANT:
+	// Your compiler says TextForPage currently wants only (ctx, pdfPath, page).
+	// If you later refactor it to accept config, change this ONE LINE:
+	//
+	// text, err := extractor.TextForPage(ctx, pdfPath, pageNum, p.extractCfg)
+	//
+	text, err := extractor.TextForPage(ctx, pdfPath, pageNum)
+	if err != nil {
+		result.Method = "needs-ocr"
+		return result
+	}
+
+	text = cleanText(text)
+	result.Text = text
+
+	decision := quality.Score(text, minWords)
+	result.WordCount = decision.WordCount
+
+	if decision.NeedsOCR {
+		result.Method = "needs-ocr"
+		result.Text = ""
+	}
+
+	return result
+}
+
+func runOCRBatch(ctx context.Context, presignedURL string, pages []int, opts types.HybridProcessorOptions) (map[int]string, error) {
+	if len(pages) == 0 {
+		return map[int]string{}, nil
+	}
+
+	// Convert to 0-indexed
+	pages0 := make([]int, len(pages))
+	for i, p := range pages {
+		pages0[i] = p - 1
+	}
+
+	ocrResp, err := ocr.RunMistralOCR(
+		ctx,
+		presignedURL,
+		*opts.OCRModel,
+		pages0,
+		opts.ExtractHeader,
+		opts.ExtractFooter,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make(map[int]string, len(ocrResp.Pages))
+	for _, page := range ocrResp.Pages {
+		pageNum := page.Index + 1
+		results[pageNum] = cleanText(page.Markdown)
+	}
+
+	return results, nil
+}
+
+func mergeOCRResults(result *types.HybridExtractionResult, ocrResults map[int]string, fullOCR bool) {
+	for i := range result.Pages {
+		pageNum := result.Pages[i].PageNumber
+		if ocrText, exists := ocrResults[pageNum]; exists {
+			if fullOCR || result.Pages[i].Method == "needs-ocr" {
+				result.Pages[i].Text = ocrText
+				result.Pages[i].Method = "ocr"
+				result.Pages[i].WordCount = quality.CountWords(ocrText)
+			}
+		}
 	}
 }
 
-// --- helpers ---
+func cleanText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
 
-func fail(msg string) types.HybridExtractionResult {
-	return types.HybridExtractionResult{Success: false, Error: &msg}
-}
+	text = strings.Map(func(r rune) rune {
+		switch r {
+		case '\u200B', '\u200C', '\u200D', '\uFEFF':
+			return -1
+		case '\u00A0':
+			return ' '
+		case '\u00AD':
+			return -1
+		default:
+			return r
+		}
+	}, text)
 
-func toZeroIndexed(pages1 []int) []int {
-	out := make([]int, 0, len(pages1))
-	for _, p := range pages1 {
-		out = append(out, p-1)
-	}
-	sort.Ints(out)
-	return out
-}
+	lines := strings.Split(text, "\n")
+	var cleaned []string
+	consecutiveEmpty := 0
 
-func normalizePages(req []int, total int) []int {
-	if len(req) == 0 || total <= 0 {
-		return nil
-	}
-	seen := map[int]bool{}
-	out := make([]int, 0, len(req))
-	for _, n := range req {
-		if n < 1 || n > total {
+	for _, line := range lines {
+		line = strings.TrimRight(line, " \t")
+
+		if strings.TrimSpace(line) == "" {
+			consecutiveEmpty++
+			if consecutiveEmpty <= 2 {
+				cleaned = append(cleaned, "")
+			}
 			continue
 		}
-		if !seen[n] {
-			seen[n] = true
-			out = append(out, n)
+
+		consecutiveEmpty = 0
+
+		leadingSpaces := len(line) - len(strings.TrimLeft(line, " \t"))
+		content := strings.TrimSpace(line)
+
+		words := strings.Fields(content)
+		normalizedContent := strings.Join(words, " ")
+
+		if leadingSpaces > 0 {
+			line = strings.Repeat(" ", leadingSpaces) + normalizedContent
+		} else {
+			line = normalizedContent
+		}
+
+		cleaned = append(cleaned, line)
+	}
+
+	return strings.TrimSpace(strings.Join(cleaned, "\n"))
+}
+
+func countOCRPages(pages []types.PageExtractionResult) int {
+	count := 0
+	for _, p := range pages {
+		if p.Method == "ocr" {
+			count++
 		}
 	}
-	sort.Ints(out)
-	if len(out) == 0 {
-		return nil
+	return count
+}
+
+func calculateSavings(textLayerPages, totalPages int) int {
+	if totalPages == 0 {
+		return 0
 	}
-	return out
-}
-
-func cleanText(s string) string {
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	s = strings.ReplaceAll(s, "\r", "\n")
-	s = strings.TrimSpace(s)
-	return s
-}
-
-func cleanOCR(s string) string {
-	// keep mild normalization
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	s = strings.ReplaceAll(s, "\r", "\n")
-	return strings.TrimSpace(s)
-}
-
-func requireEnv(key string) error {
-	if os.Getenv(key) == "" {
-		return fmt.Errorf("missing env %s", key)
-	}
-	return nil
+	return int(float64(textLayerPages) / float64(totalPages) * 100)
 }

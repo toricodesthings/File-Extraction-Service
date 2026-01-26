@@ -1,0 +1,8 @@
+**/node_modules
+worker/node_modules
+.wrangler
+.next
+dist
+build
+.git
+*.pdf

@@ -16,3 +16,7 @@ yarn-error.log*
 .dev.vars
 .env
 .env.*
+
+# cloudflare
+
+.wrangler/

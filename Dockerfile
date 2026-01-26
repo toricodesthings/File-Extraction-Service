@@ -1,11 +1,12 @@
-FROM golang:1.25.6-trixie AS build
+FROM golang:1.25.6-bookworm AS build
 WORKDIR /src
-COPY go.mod go.sum ./
+COPY go.mod ./
+COPY go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /out/pdfproc ./cmd/server
 
-FROM debian:trixie-slim
+FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils ca-certificates tzdata \
  && rm -rf /var/lib/apt/lists/*

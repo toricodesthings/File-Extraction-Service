@@ -1,5 +1,5 @@
 {
-  "name": "pdf-extraction-worker",
+  "name": "nullset-pdf-extraction-worker",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,7 +10,8 @@
     "@cloudflare/containers": "^0.1.0"
   },
   "devDependencies": {
-    "wrangler": "^4.60.0",
-    "typescript": "^5.9.3"
+    "@cloudflare/workers-types": "^4.20260124.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.60.0"
   }
 }

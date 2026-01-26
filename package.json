@@ -1,0 +1,23 @@
+{
+  "name": "pdf-extraction-service",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/toricodesthings/PDF-to-Text-Extraction-Service.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/toricodesthings/PDF-to-Text-Extraction-Service/issues"
+  },
+  "homepage": "https://github.com/toricodesthings/PDF-to-Text-Extraction-Service#readme",
+  "devDependencies": {
+    "wrangler": "^4.60.0"
+  }
+}
