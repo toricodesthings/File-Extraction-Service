@@ -250,7 +250,7 @@ func (p *Processor) extractSinglePage(ctx context.Context, pdfPath string, pageN
 	//
 	// text, err := extractor.TextForPage(ctx, pdfPath, pageNum, p.extractCfg)
 	//
-	text, err := extractor.TextForPage(ctx, pdfPath, pageNum)
+	text, err := extractor.TextForPage(ctx, pdfPath, pageNum, p.extractCfg)
 	if err != nil {
 		result.Method = "needs-ocr"
 		return result

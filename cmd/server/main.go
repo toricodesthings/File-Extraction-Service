@@ -409,9 +409,15 @@ func parseJSON[T any](r *http.Request, limit int64) (T, error) {
 	if err := dec.Decode(&out); err != nil {
 		return out, err
 	}
-	if dec.More() {
-		return out, fmt.Errorf("unexpected trailing data")
+
+	// Ensure there's nothing else after the first JSON value
+	if err := dec.Decode(new(any)); err != io.EOF {
+		if err == nil {
+			return out, fmt.Errorf("unexpected trailing data")
+		}
+		return out, err
 	}
+
 	return out, nil
 }
 

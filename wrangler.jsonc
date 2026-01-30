@@ -22,7 +22,18 @@
     { "tag": "v1", "new_sqlite_classes": ["PdfProcContainer"] }
   ],
 
-  // PROD rate limits (top-level = default environment)
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.01
+    }
+  },
+
+
   "ratelimits": [
     {
       "name": "RATE_LIMITER_PREVIEW",
