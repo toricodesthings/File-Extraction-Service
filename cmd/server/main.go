@@ -213,7 +213,10 @@ func handleExtract(w http.ResponseWriter, r *http.Request, processor *hybrid.Pro
 		defer ocrSem.Release(1)
 	}
 
-	result, _ := processor.ProcessHybrid(ctx, req.PresignedURL, pdfPath, opts)
+	result, err := processor.ProcessHybrid(ctx, req.PresignedURL, pdfPath, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "extract failed: %v url=%s\n", err, redactPresignedURL(req.PresignedURL))
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -241,6 +244,9 @@ func handlePreview(w http.ResponseWriter, r *http.Request, processor *hybrid.Pro
 
 	opts := processor.ApplyDefaults(req.Options)
 	prev := processor.ProcessPreview(ctx, pdfPath, opts)
+	if !prev.Success && prev.Error != nil {
+		fmt.Fprintf(os.Stderr, "preview failed: %s url=%s\n", *prev.Error, redactPresignedURL(req.PresignedURL))
+	}
 
 	writeJSON(w, http.StatusOK, prev)
 }

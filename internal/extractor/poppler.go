@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -53,7 +54,7 @@ func GetPDFInfo(ctx context.Context, pdfPath string, cfg ExtractorConfig) (PDFIn
 	ctx, cancel := context.WithTimeout(ctx, cfg.PDFInfoTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "pdfinfo", "-q", "-upw", "", pdfPath)
+	cmd := exec.CommandContext(ctx, "pdfinfo", "-q", "-upw", "", "-opw", "", pdfPath)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -112,6 +113,7 @@ func TextForPage(ctx context.Context, pdfPath string, page int, cfg ExtractorCon
 		"pdftotext",
 		"-q",
 		"-upw", "",
+		"-opw", "",
 		"-f", strconv.Itoa(page),
 		"-l", strconv.Itoa(page),
 		"-layout",
@@ -148,6 +150,7 @@ func ExtractAllPages(ctx context.Context, pdfPath string, cfg ExtractorConfig) (
 		"pdftotext",
 		"-q",
 		"-upw", "",
+		"-opw", "",
 		"-layout",
 		"-nopgbrk",
 		"-enc", "UTF-8",
@@ -260,6 +263,7 @@ func classifyPopplerErr(tool string, err error, ctx context.Context, stderr stri
 			"encrypted",
 			"Encrypted",
 		) {
+			logPopplerErr(tool, stderr, 0)
 			return fmt.Errorf("PDF is password protected")
 		}
 		if containsAny(stderr,
@@ -269,6 +273,7 @@ func classifyPopplerErr(tool string, err error, ctx context.Context, stderr stri
 			"Couldn't find trailer dictionary",
 			"May not be a PDF file",
 		) {
+			logPopplerErr(tool, stderr, 0)
 			return fmt.Errorf("PDF appears to be damaged or invalid")
 		}
 		return fmt.Errorf("%s failed: %s", tool, stderr)
@@ -292,12 +297,15 @@ func classifyPdftotextErr(err error, ctx context.Context, stderr string, page in
 	stderr = strings.TrimSpace(stderr)
 	if stderr != "" {
 		if containsAny(stderr, "Incorrect password", "password", "encrypted", "Encrypted") {
+			logPopplerErr("pdftotext", stderr, page)
 			return fmt.Errorf("PDF is password protected")
 		}
 		if containsAny(stderr, "PDF file is damaged", "damaged", "Syntax Error", "invalid", "May not be a PDF file") {
+			logPopplerErr("pdftotext", stderr, page)
 			return fmt.Errorf("PDF file is damaged or corrupted")
 		}
 		if strings.Contains(stderr, "I/O Error") && strings.Contains(stderr, "Couldn't open file") {
+			logPopplerErr("pdftotext", stderr, page)
 			return fmt.Errorf("unable to open PDF")
 		}
 		if page > 0 {
@@ -327,4 +335,19 @@ func containsAny(s string, needles ...string) bool {
 		}
 	}
 	return false
+}
+
+func logPopplerErr(tool, stderr string, page int) {
+	msg := strings.TrimSpace(stderr)
+	if msg == "" {
+		return
+	}
+	if len(msg) > 500 {
+		msg = msg[:500] + "..."
+	}
+	if page > 0 {
+		fmt.Fprintf(os.Stderr, "%s error (page %d): %s\n", tool, page, msg)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "%s error: %s\n", tool, msg)
 }
