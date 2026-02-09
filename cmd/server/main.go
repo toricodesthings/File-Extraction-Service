@@ -9,9 +9,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -401,6 +403,39 @@ func sanitizeLogString(s string) string {
 	return s
 }
 
+func redactPresignedURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "[invalid-url]"
+	}
+
+	query := u.Query()
+	if len(query) == 0 {
+		return u.Scheme + "://" + u.Host + u.Path
+	}
+
+	keys := make([]string, 0, len(query))
+	for k := range query {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		lk := strings.ToLower(k)
+		if lk == "x-amz-expires" {
+			parts = append(parts, k+"="+query.Get(k))
+			continue
+		}
+		parts = append(parts, k+"=<redacted>")
+	}
+
+	return u.Scheme + "://" + u.Host + u.Path + "?" + strings.Join(parts, "&")
+}
+
 func parseJSON[T any](r *http.Request, limit int64) (T, error) {
 	var out T
 	dec := json.NewDecoder(io.LimitReader(r.Body, limit))
@@ -435,6 +470,33 @@ func writeErr(w http.ResponseWriter, status int, code, message string) {
 	})
 }
 
+// validatePDFMagic checks that a file starts with %PDF (the PDF magic bytes).
+// This catches cases where R2/S3 returns an XML error page, HTML, or other
+// non-PDF content that would otherwise be misclassified by pdfinfo.
+func validatePDFMagic(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open for validation: %w", err)
+	}
+	defer f.Close()
+
+	header := make([]byte, 5)
+	n, err := f.Read(header)
+	if err != nil || n < 5 {
+		return fmt.Errorf("downloaded file is too small to be a valid PDF")
+	}
+
+	if string(header[:4]) != "%PDF" {
+		// Log the first bytes for debugging (safe — it's just magic bytes, not user data)
+		preview := string(header[:n])
+		if len(preview) > 40 {
+			preview = preview[:40]
+		}
+		return fmt.Errorf("downloaded file is not a PDF (starts with %q) — presigned URL may be expired or invalid", preview)
+	}
+	return nil
+}
+
 func downloadPDFToTemp(ctx context.Context, url string, maxBytes int64, timeout time.Duration) (path string, cleanup func(), err error) {
 	tmpDir, err := os.MkdirTemp("", "pdfproc-*")
 	if err != nil {
@@ -457,20 +519,24 @@ func downloadPDFToTemp(ctx context.Context, url string, maxBytes int64, timeout 
 		},
 	}
 
+	redactedURL := redactPresignedURL(url)
 	resp, err := client.Do(req)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "download error: %v url=%s\n", err, redactedURL)
 		cleanup()
 		return "", nil, fmt.Errorf("download: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "download failed: status=%d url=%s\n", resp.StatusCode, redactedURL)
 		cleanup()
 		return "", nil, fmt.Errorf("download failed: HTTP %d", resp.StatusCode)
 	}
 
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))
 	if ct != "" && !strings.Contains(ct, "pdf") && !strings.Contains(ct, "octet-stream") {
+		fmt.Fprintf(os.Stderr, "download invalid content-type: %s url=%s\n", ct, redactedURL)
 		cleanup()
 		return "", nil, fmt.Errorf("invalid content-type: %s", ct)
 	}
@@ -489,12 +555,21 @@ func downloadPDFToTemp(ctx context.Context, url string, maxBytes int64, timeout 
 		return "", nil, fmt.Errorf("write: %w", err)
 	}
 	if n > maxBytes {
+		fmt.Fprintf(os.Stderr, "download too large: %d bytes url=%s\n", n, redactedURL)
 		cleanup()
 		return "", nil, fmt.Errorf("PDF exceeds %dMB limit", maxBytes/(1<<20))
 	}
 	if n < 100 {
+		fmt.Fprintf(os.Stderr, "download too small: %d bytes url=%s\n", n, redactedURL)
 		cleanup()
 		return "", nil, fmt.Errorf("PDF too small (likely invalid)")
+	}
+
+	// Validate PDF magic bytes — catches R2 XML errors, HTML pages, etc.
+	if err := validatePDFMagic(outPath); err != nil {
+		fmt.Fprintf(os.Stderr, "pdf magic validation failed: %v url=%s\n", err, redactedURL)
+		cleanup()
+		return "", nil, err
 	}
 
 	return outPath, cleanup, nil

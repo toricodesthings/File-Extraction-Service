@@ -54,6 +54,9 @@ async function getReadyInstance(env: Env): Promise<PdfProcContainer> {
   containerHealthCache.lastHealthCheck = now;
 
   if (!healthResp.ok) {
+    console.error("container health check failed", {
+      status: healthResp.status,
+    });
     containerHealthCache.isHealthy = false;
     throw new Error(`Container unhealthy: ${healthResp.status} - ${await healthResp.text()}`);
   }
@@ -115,6 +118,7 @@ export default {
           if (!resp.ok) return json({ status: "unhealthy", container: resp.status }, { status: 503 });
           return json(await resp.json(), { status: 200 });
         } catch (e: any) {
+          console.error("health proxy failed", { error: e?.message || "unknown" });
           return json({ status: "unhealthy", error: e?.message || "unknown" }, { status: 503 });
         }
       }
@@ -145,6 +149,12 @@ export default {
             body: JSON.stringify(body),
           })
         );
+
+        if (!resp.ok) {
+          console.error("preview container response not ok", {
+            status: resp.status,
+          });
+        }
 
         return new Response(await resp.text(), {
           status: resp.status,
@@ -179,6 +189,12 @@ export default {
           })
         );
 
+        if (!resp.ok) {
+          console.error("extract container response not ok", {
+            status: resp.status,
+          });
+        }
+
         return new Response(await resp.text(), {
           status: resp.status,
           headers: { "Content-Type": "application/json", ...CORS_HEADERS },
@@ -187,6 +203,7 @@ export default {
 
       return json({ success: false, error: "Not found", code: "not_found" }, { status: 404 });
     } catch (error: any) {
+      console.error("worker error", { error: error?.message || "unknown" });
       const isTimeout = error?.message?.includes("timeout") || error?.name === "TimeoutError";
       const isTooBig = error?.message?.includes("too large");
 

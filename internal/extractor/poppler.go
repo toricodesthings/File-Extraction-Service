@@ -53,7 +53,7 @@ func GetPDFInfo(ctx context.Context, pdfPath string, cfg ExtractorConfig) (PDFIn
 	ctx, cancel := context.WithTimeout(ctx, cfg.PDFInfoTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "pdfinfo", "-q", pdfPath)
+	cmd := exec.CommandContext(ctx, "pdfinfo", "-q", "-upw", "", pdfPath)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -111,6 +111,7 @@ func TextForPage(ctx context.Context, pdfPath string, page int, cfg ExtractorCon
 	cmd := exec.CommandContext(ctx,
 		"pdftotext",
 		"-q",
+		"-upw", "",
 		"-f", strconv.Itoa(page),
 		"-l", strconv.Itoa(page),
 		"-layout",
@@ -146,6 +147,7 @@ func ExtractAllPages(ctx context.Context, pdfPath string, cfg ExtractorConfig) (
 	cmd := exec.CommandContext(ctx,
 		"pdftotext",
 		"-q",
+		"-upw", "",
 		"-layout",
 		"-nopgbrk",
 		"-enc", "UTF-8",
