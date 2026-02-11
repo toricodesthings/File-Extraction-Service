@@ -1,25 +1,25 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "nullset-pdf-text-extraction-service",
+  "name": "nullset-file-processing-service",
   "main": "worker/src/index.ts",
-  "compatibility_date": "2026-01-25",
+  "compatibility_date": "2026-02-11",
 
   "r2_buckets": [
-    { "binding": "PDF_BUCKET", "bucket_name": "users-knowledge-base" }
+    { "binding": "FILE_BUCKET", "bucket_name": "users-knowledge-base" }
   ],
 
   "containers": [
-    { "class_name": "PdfProcContainer", "image": "./Dockerfile", "max_instances": 10 }
+    { "class_name": "FileProcContainer", "image": "./Dockerfile", "max_instances": 10 }
   ],
 
   "durable_objects": {
     "bindings": [
-      { "class_name": "PdfProcContainer", "name": "PDFPROC" }
+      { "class_name": "FileProcContainer", "name": "FILEPROC" }
     ]
   },
 
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["PdfProcContainer"] }
+    { "tag": "v1", "new_sqlite_classes": ["FileProcContainer"] }
   ],
 
   "observability": {

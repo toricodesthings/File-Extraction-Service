@@ -130,7 +130,7 @@ func executeOCRRequest(ctx context.Context, apiKey string, bodyBytes []byte) (OC
 
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "pdfproc/1.0")
+	req.Header.Set("User-Agent", "fileproc/1.0")
 
 	client := &http.Client{
 		Timeout: requestTimeout,
@@ -227,4 +227,59 @@ func uniqueInts(xs []int) []int {
 	}
 
 	return out
+}
+
+// RunMistralImageOCR calls the Mistral OCR API with an image URL using the
+// "image_url" document type (as opposed to "document_url" for PDFs). The image
+// is not downloaded — the URL is sent directly to Mistral.
+func RunMistralImageOCR(ctx context.Context, imageURL string, model string) (OCRResponse, error) {
+	key := os.Getenv("MISTRAL_API_KEY")
+	if key == "" {
+		return OCRResponse{}, fmt.Errorf("MISTRAL_API_KEY not configured")
+	}
+
+	if imageURL == "" {
+		return OCRResponse{}, fmt.Errorf("image URL required")
+	}
+	if model == "" {
+		model = "mistral-ocr-latest"
+	}
+
+	body := map[string]any{
+		"model": model,
+		"document": map[string]any{
+			"type":      "image_url",
+			"image_url": imageURL,
+		},
+	}
+
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return OCRResponse{}, fmt.Errorf("marshal: %w", err)
+	}
+
+	// Retry logic (same as PDF variant)
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return OCRResponse{}, ctx.Err()
+			case <-time.After(retryDelay * time.Duration(attempt)):
+			}
+		}
+
+		result, err := executeOCRRequest(ctx, key, bodyBytes)
+		if err == nil {
+			return result, nil
+		}
+
+		lastErr = err
+
+		if isClientError(err) {
+			break
+		}
+	}
+
+	return OCRResponse{}, fmt.Errorf("image OCR failed after %d attempts: %w", maxRetries+1, lastErr)
 }

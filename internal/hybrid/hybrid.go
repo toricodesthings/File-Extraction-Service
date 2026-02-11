@@ -2,18 +2,19 @@ package hybrid
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
 
-	"github.com/toricodesthings/PDF-to-Text-Extraction-Service/internal/config"
-	"github.com/toricodesthings/PDF-to-Text-Extraction-Service/internal/extractor"
-	"github.com/toricodesthings/PDF-to-Text-Extraction-Service/internal/format"
-	"github.com/toricodesthings/PDF-to-Text-Extraction-Service/internal/ocr"
-	"github.com/toricodesthings/PDF-to-Text-Extraction-Service/internal/quality"
-	"github.com/toricodesthings/PDF-to-Text-Extraction-Service/internal/types"
+	"github.com/toricodesthings/file-processing-service/internal/config"
+	"github.com/toricodesthings/file-processing-service/internal/extractor"
+	"github.com/toricodesthings/file-processing-service/internal/format"
+	"github.com/toricodesthings/file-processing-service/internal/ocr"
+	"github.com/toricodesthings/file-processing-service/internal/quality"
+	"github.com/toricodesthings/file-processing-service/internal/types"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -81,7 +82,7 @@ func (p *Processor) ProcessHybrid(
 	if totalPages == 0 {
 		msg := "PDF has no pages"
 		result.Error = &msg
-		return result, fmt.Errorf(msg)
+		return result, errors.New(msg)
 	}
 
 	// Determine pages to process

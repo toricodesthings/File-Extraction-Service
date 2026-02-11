@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/toricodesthings/PDF-to-Text-Extraction-Service/internal/types"
+	"github.com/toricodesthings/file-processing-service/internal/types"
 )
 
 var (

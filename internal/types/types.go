@@ -48,3 +48,15 @@ type PreviewResult struct {
 	TextLayerPages int     `json:"textLayerPages"`
 	Error          *string `json:"error,omitempty"`
 }
+
+// ── Image OCR types ──────────────────────────────────────────────────────────
+
+type ImageExtractRequest struct {
+	ImageURL string `json:"imageUrl"`
+}
+
+type ImageExtractionResult struct {
+	Success bool    `json:"success"`
+	Text    string  `json:"text"`
+	Error   *string `json:"error,omitempty"`
+}

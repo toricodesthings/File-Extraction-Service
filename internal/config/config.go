@@ -32,8 +32,9 @@ type Config struct {
 	IdleTimeout       time.Duration
 
 	// Request timeouts
-	ExtractTimeout time.Duration
-	PreviewTimeout time.Duration
+	ExtractTimeout      time.Duration
+	PreviewTimeout      time.Duration
+	ImageExtractTimeout time.Duration
 
 	// Download
 	DownloadTimeout time.Duration
@@ -55,6 +56,7 @@ type Config struct {
 
 	// http
 	MaxHeaderBytes int
+	MaxImageURLLen int
 
 	// Hybrid defaults (used when request options omit values)
 	DefaultMinWordsThreshold    int
@@ -85,8 +87,9 @@ func Load() Config {
 		WriteTimeout:      envDur("WRITE_TIMEOUT", 180*time.Second),
 		IdleTimeout:       envDur("IDLE_TIMEOUT", 60*time.Second),
 
-		ExtractTimeout: envDur("EXTRACT_TIMEOUT", 160*time.Second),
-		PreviewTimeout: envDur("PREVIEW_TIMEOUT", 60*time.Second),
+		ExtractTimeout:      envDur("EXTRACT_TIMEOUT", 160*time.Second),
+		PreviewTimeout:      envDur("PREVIEW_TIMEOUT", 60*time.Second),
+		ImageExtractTimeout: envDur("IMAGE_EXTRACT_TIMEOUT", 120*time.Second),
 
 		DownloadTimeout: envDur("DOWNLOAD_TIMEOUT", 25*time.Second),
 
@@ -102,6 +105,7 @@ func Load() Config {
 		HealthDegradeRatio: envFloat("HEALTH_DEGRADE_RATIO", 0.9),
 
 		MaxHeaderBytes: envInt("MAX_HEADER_BYTES", 1<<20),
+		MaxImageURLLen: envInt("MAX_IMAGE_URL_LEN", 2048),
 
 		DefaultMinWordsThreshold:    envInt("DEFAULT_MIN_WORDS", 20),
 		DefaultOCRTriggerRatio:      envFloat("DEFAULT_OCR_TRIGGER_RATIO", 0.25),

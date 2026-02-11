@@ -1,4 +1,4 @@
-module github.com/toricodesthings/PDF-to-Text-Extraction-Service
+module github.com/toricodesthings/file-processing-service
 
 go 1.25.6
 

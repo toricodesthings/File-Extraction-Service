@@ -8,16 +8,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/toricodesthings/PDF-to-Text-Extraction-Service.git"
+    "url": "git+https://github.com/toricodesthings/File-to-Text-Extraction-Service.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/toricodesthings/PDF-to-Text-Extraction-Service/issues"
+    "url": "https://github.com/toricodesthings/File-to-Text-Extraction-Service/issues"
   },
-  "homepage": "https://github.com/toricodesthings/PDF-to-Text-Extraction-Service#readme",
+  "homepage": "https://github.com/toricodesthings/File-to-Text-Extraction-Service#readme",
   "devDependencies": {
-    "wrangler": "^4.63.0"
+    "wrangler": "^4.64.0"
   }
 }

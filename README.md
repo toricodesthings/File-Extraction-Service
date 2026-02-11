@@ -1,16 +1,18 @@
-# PDF Text Extraction Service ✅
+# File Text Extraction Service ✅
 
-A lightweight service that extracts text from PDFs using a hybrid approach: use the text layer where possible and fall back to OCR (Mistral) when needed. The project exposes two primary public endpoints (via the Cloudflare Worker):
+A lightweight service that extracts text from files (PDFs and images). PDFs use a hybrid approach: use the text layer where possible and fall back to OCR (Mistral) when needed; images use OCR only. The project exposes public endpoints (via the Cloudflare Worker):
 
 - POST /api/pdf/preview — quick preview and OCR-needed hint
 - POST /api/pdf/extract — full hybrid extraction (per-page results + combined text)
+- POST /api/image/extract — OCR for image URLs (Mistral only)
+- POST /api/file/presign — returns a short-lived presigned URL for an R2 key
 
 ---
 
 ## 🚀 Quick summary
 
 - Public entrypoint: the Worker (Cloudflare) proxies requests to a local container running the Go server.
-- The Worker performs rate-limiting and health checks; the Go server performs downloads, text extraction (poppler pdftotext), quality scoring, and optional OCR via Mistral.
+- The Worker performs rate-limiting and health checks; the Go server performs downloads, PDF text extraction (poppler pdftotext), quality scoring, and OCR via Mistral for PDFs and images.
 - The main behaviour is implemented in `internal/hybrid` and types are defined in `internal/types`.
 
 ---
@@ -42,7 +44,7 @@ go run ./cmd/server
 
 ## 🔌 API — request shape
 
-Both public Worker routes expect JSON with the following top-level shape:
+The PDF Worker routes accept either a `presignedUrl` or an R2 `key`:
 
 ```json
 {
@@ -64,8 +66,24 @@ Both public Worker routes expect JSON with the following top-level shape:
 }
 ```
 
-- `presignedUrl` (string, required): public or presigned URL to download the PDF.
+- `presignedUrl` (string, optional): public or presigned URL to download the PDF.
+- `key` (string, optional): R2 object key (Worker will generate a short-lived presigned URL).
 - `options` (object, optional): extraction knobs. Any missing options are filled by the server defaults (see **Config & Defaults** below).
+
+For image OCR, the request shape is (either `imageUrl`, `presignedUrl`, or `key`):
+```json
+{
+  "imageUrl": "https://.../image.png"
+}
+```
+
+For presigned URLs, the request shape is:
+```json
+{
+  "key": "user/.../files/<id>",
+  "expiresIn": 600
+}
+```
 
 ---
 
@@ -76,12 +94,18 @@ Both public Worker routes expect JSON with the following top-level shape:
   - Quick preview of the document (only text-layer extraction is used). Returns `PreviewResult`.
 - POST `/api/pdf/extract`
   - Full hybrid extraction. Returns `HybridExtractionResult`.
+- POST `/api/image/extract`
+  - Image OCR only (Mistral). Returns `ImageExtractionResult`.
+- POST `/api/file/presign`
+  - Returns a short-lived `presignedUrl` for an R2 key.
+  - Allowed key prefixes: `user/` and `tests/`.
 
 The Worker validates the request body size, enforces rate limits, starts/health-checks the extraction container, and proxies the request to the container's internal endpoints.
 
 ### Internal (container)
-- POST `/preview` — **internal** endpoint; requires header `X-Internal-Auth: <INTERNAL_SHARED_SECRET>`
-- POST `/extract` — **internal** endpoint; requires same header
+- POST `/pdf/preview` — **internal** endpoint; requires header `X-Internal-Auth: <INTERNAL_SHARED_SECRET>`
+- POST `/pdf/extract` — **internal** endpoint; requires same header
+- POST `/image/extract` — **internal** endpoint; requires same header
 
 > The Worker sets the internal auth header automatically when proxying; if you call the container directly, include the header.
 
@@ -176,21 +200,42 @@ curl -X POST "https://your-worker.dev/api/pdf/extract" \
   -d '{"presignedUrl":"https://.../doc.pdf"}'
 ```
 
+Extract request using an R2 key (via Worker):
+```bash
+curl -X POST "https://your-worker.dev/api/pdf/extract" \
+  -H "Content-Type: application/json" \
+  -d '{"key":"user/1c2edf8376defc7ee7653224f5c58dbf/files/12d11a37-8fe7-4266-86f8-6358af0399fb"}'
+```
+
 Direct container call (for debugging) — include internal auth header:
 ```bash
-curl -X POST "http://localhost:8080/extract" \
+curl -X POST "http://localhost:8080/pdf/extract" \
   -H "Content-Type: application/json" \
   -H "X-Internal-Auth: $INTERNAL_SHARED_SECRET" \
   -d '{"presignedUrl":"https://.../doc.pdf"}'
 ```
 
+Minimal image OCR request (via Worker):
+```bash
+curl -X POST "https://your-worker.dev/api/image/extract" \
+  -H "Content-Type: application/json" \
+  -d '{"imageUrl":"https://.../image.png"}'
+```
+
+Image OCR request using an R2 key (via Worker):
+```bash
+curl -X POST "https://your-worker.dev/api/image/extract" \
+  -H "Content-Type: application/json" \
+  -d '{"key":"user/1c2edf8376defc7ee7653224f5c58dbf/files/12d11a37-8fe7-4266-86f8-6358af0399fb"}'
+```
+
 ---
 
 ## 🧭 Troubleshooting & notes
-- If you see `presignedUrl required` — ensure `presignedUrl` is present and non-empty.
+- If you see `presignedUrl or key required` — ensure either `presignedUrl` or `key` is present and non-empty.
 - `download_failed` often means the remote server returned non-200 or disallowed content-type.
 - If OCR is needed but `MISTRAL_API_KEY` is missing, OCR will fail and the server will return `ocr`-related error messages.
-- The service expects PDFs and checks `Content-Type` for `pdf` or `octet-stream` when downloading.
+- The PDF routes expect PDFs and check `Content-Type` for `pdf` or `octet-stream` when downloading.
 
 ---
 

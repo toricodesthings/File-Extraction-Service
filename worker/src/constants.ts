@@ -2,20 +2,23 @@ export const ROUTES = {
   HEALTH: "/health",
   PREVIEW: "/api/pdf/preview",
   EXTRACT: "/api/pdf/extract",
+  IMAGE_EXTRACT: "/api/image/extract",
+  FILE_PRESIGN: "/api/file/presign",
 } as const;
 
 export const CONTAINER = {
-  NAME: "pdfproc-singleton",
+  NAME: "fileproc-singleton",
   PORT: 8080,
 
   HEALTH_URL: "http://container/health",
-  PREVIEW_URL: "http://container/preview",
-  EXTRACT_URL: "http://container/extract",
+  PREVIEW_URL: "http://container/pdf/preview",
+  EXTRACT_URL: "http://container/pdf/extract",
+  IMAGE_EXTRACT_URL: "http://container/image/extract",
 
   START_TIMEOUT_MS: 30_000,
   HEALTH_TIMEOUT_MS: 5_000,
 
-  HEALTH_CHECK_INTERVAL_MS: 30_000,
+  HEALTH_CHECK_INTERVAL_MS: 60_000,
 
   START: {
     instanceGetTimeoutMS: 30_000,
