@@ -3,6 +3,7 @@ import { CONTAINER, CORS_HEADERS, LIMITS, ROUTES, json } from "./constants";
 
 export interface Env {
   MISTRAL_API_KEY: string;
+  OPENROUTER_API_KEY: string;
   INTERNAL_SHARED_SECRET: string;
   FILE_BUCKET: R2Bucket;
   FILEPROC: { getByName(name: string): FileProcContainer };
@@ -38,6 +39,7 @@ async function getReadyInstance(env: Env): Promise<FileProcContainer> {
     startOptions: {
       envVars: {
         MISTRAL_API_KEY: env.MISTRAL_API_KEY || "",
+        OPENROUTER_API_KEY: env.OPENROUTER_API_KEY || "",
         INTERNAL_SHARED_SECRET: env.INTERNAL_SHARED_SECRET || "",
       },
     },

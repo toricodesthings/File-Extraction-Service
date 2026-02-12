@@ -117,6 +117,9 @@ func main() {
 	if strings.TrimSpace(cfg.MistralAPIKey) == "" {
 		fmt.Fprintln(os.Stderr, "warning: MISTRAL_API_KEY not set (OCR will fail)")
 	}
+	if strings.TrimSpace(cfg.OpenRouterAPIKey) == "" {
+		fmt.Fprintln(os.Stderr, "warning: OPENROUTER_API_KEY not set (vision classification will fall back to OCR-only)")
+	}
 
 	go cleanupRateLimiters()
 
@@ -274,7 +277,7 @@ func handleImageExtract(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ocrSem.Release(1)
 
-	result, _ := image.ProcessImageOCR(ctx, req.ImageURL, cfg.DefaultOCRModel)
+	result, _ := image.ProcessImage(ctx, req.ImageURL, cfg.DefaultOCRModel, cfg.DefaultVisionModel, cfg.VisionRequestTimeout)
 	writeJSON(w, http.StatusOK, result)
 }
 

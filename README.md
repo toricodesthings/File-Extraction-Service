@@ -1,10 +1,10 @@
 # File Text Extraction Service ✅
 
-A lightweight service that extracts text from files (PDFs and images). PDFs use a hybrid approach: use the text layer where possible and fall back to OCR (Mistral) when needed; images use OCR only. The project exposes public endpoints (via the Cloudflare Worker):
+A lightweight service that extracts text from files (PDFs and images). PDFs use a hybrid approach: use the text layer where possible and fall back to OCR (Mistral) when needed; images use a vision-first pipeline — a cheap vision model (OpenRouter) classifies the image, then routes to OCR for text-heavy content or returns a rich description for visual content. The project exposes public endpoints (via the Cloudflare Worker):
 
 - POST /api/pdf/preview — quick preview and OCR-needed hint
 - POST /api/pdf/extract — full hybrid extraction (per-page results + combined text)
-- POST /api/image/extract — OCR for image URLs (Mistral only)
+- POST /api/image/extract — smart image extraction (vision classification → OCR or description)
 - POST /api/file/presign — returns a short-lived presigned URL for an R2 key
 
 ---
@@ -12,8 +12,8 @@ A lightweight service that extracts text from files (PDFs and images). PDFs use 
 ## 🚀 Quick summary
 
 - Public entrypoint: the Worker (Cloudflare) proxies requests to a local container running the Go server.
-- The Worker performs rate-limiting and health checks; the Go server performs downloads, PDF text extraction (poppler pdftotext), quality scoring, and OCR via Mistral for PDFs and images.
-- The main behaviour is implemented in `internal/hybrid` and types are defined in `internal/types`.
+- The Worker performs rate-limiting and health checks; the Go server performs downloads, PDF text extraction (poppler pdftotext), quality scoring, OCR via Mistral, and vision classification via OpenRouter.
+- The main behaviour is implemented in `internal/hybrid` (PDFs) and `internal/image` (images). Types are defined in `internal/types`.
 
 ---
 
@@ -38,7 +38,7 @@ npx wrangler dev
 go run ./cmd/server
 ```
 
-> Note: the server requires `INTERNAL_SHARED_SECRET` to be set (>=32 chars). If `MISTRAL_API_KEY` is not set OCR will fail.
+> Note: the server requires `INTERNAL_SHARED_SECRET` to be set (>=32 chars). If `MISTRAL_API_KEY` is not set OCR will fail. If `OPENROUTER_API_KEY` is not set, image extraction falls back to OCR-only.
 
 ---
 
@@ -95,7 +95,12 @@ For presigned URLs, the request shape is:
 - POST `/api/pdf/extract`
   - Full hybrid extraction. Returns `HybridExtractionResult`.
 - POST `/api/image/extract`
-  - Image OCR only (Mistral). Returns `ImageExtractionResult`.
+  - Smart image extraction with vision-first routing.
+  - A cheap vision model (Mistral Small 3.1 via OpenRouter) first classifies the image as text/visual/mixed.
+  - Text content (handwriting, documents, screenshots) → Mistral OCR for precise transcription.
+  - Visual content (photos, artwork) → vision description used directly.
+  - Mixed content (diagrams, charts) → OCR + vision description.
+  - Returns `ImageExtractionResult` with `method` indicating what path was taken.
 - POST `/api/file/presign`
   - Returns a short-lived `presignedUrl` for an R2 key.
   - Allowed key prefixes: `user/` and `tests/`.
@@ -152,6 +157,22 @@ Common `code` values: `bad_request`, `rate_limit`, `not_found`, `timeout`, `requ
 - `costSavingsPercent` estimates the percentage of pages served from the cheaper text layer.
 - If OCR fails or other errors occur while processing, `error` will be present and `success` may be `false`.
 
+### ImageExtractionResult
+```json
+{
+  "success": true,
+  "text": "...primary text for embedding...",
+  "method": "ocr",
+  "imageType": "handwriting",
+  "description": "A page of handwritten notes about organic chemistry..."
+}
+```
+- `text` — primary content for embedding. OCR transcription for text/mixed content, vision description for visual content.
+- `method` — one of: `ocr` (text content, OCR ran), `vision` (visual content, description only), `ocr+vision` (mixed content, both ran).
+- `imageType` — classification from vision model: `handwriting`, `document`, `screenshot`, `whiteboard`, `photo`, `diagram`, `chart`, `artwork`, `meme`, `other`.
+- `description` — vision-generated description (present whenever vision ran; absent on OCR-only fallback).
+- If vision classification is unavailable (no API key, service down), falls back to OCR-only and `method` will be `ocr`.
+
 ---
 
 ## 🛡️ Rate limits & throttling
@@ -166,6 +187,7 @@ Most server config is driven by environment variables (defaults shown):
 
 - `INTERNAL_SHARED_SECRET` (required) — secret used between Worker and container (must be >= 32 chars).
 - `MISTRAL_API_KEY` (optional) — required for OCR (Mistral). If empty OCR requests will fail.
+- `OPENROUTER_API_KEY` (optional) — required for vision classification (OpenRouter). If empty, image extraction falls back to OCR-only.
 
 Server limits & defaults (selected):
 - `PORT` = "8080"
@@ -179,6 +201,8 @@ Server limits & defaults (selected):
 - `DEFAULT_OCR_MODEL` = "mistral-ocr-latest"
 - `DEFAULT_PREVIEW_PAGES` = 8
 - `DEFAULT_PREVIEW_CHARS` = 20000
+- `DEFAULT_VISION_MODEL` = "mistralai/mistral-small-3.1-24b-instruct"
+- `VISION_REQUEST_TIMEOUT` = 30s
 
 (See `internal/config/config.go` for the full list and validation rules.)
 
@@ -235,6 +259,7 @@ curl -X POST "https://your-worker.dev/api/image/extract" \
 - If you see `presignedUrl or key required` — ensure either `presignedUrl` or `key` is present and non-empty.
 - `download_failed` often means the remote server returned non-200 or disallowed content-type.
 - If OCR is needed but `MISTRAL_API_KEY` is missing, OCR will fail and the server will return `ocr`-related error messages.
+- If `OPENROUTER_API_KEY` is missing, image extraction falls back to OCR-only (no vision classification).
 - The PDF routes expect PDFs and check `Content-Type` for `pdf` or `octet-stream` when downloading.
 
 ---
@@ -242,7 +267,9 @@ curl -X POST "https://your-worker.dev/api/image/extract" \
 ## 🧩 Developer notes
 - Main server: `cmd/server/main.go`
 - Hybrid logic: `internal/hybrid/hybrid.go`
-- OCR wrapper: `internal/ocr/mistral.go`
+- Image pipeline (vision + OCR routing): `internal/image/image.go`
+- Vision classifier (OpenRouter): `internal/vision/openrouter.go`
+- OCR wrapper (Mistral): `internal/ocr/mistral.go`
 - Extraction helpers: `internal/extractor/poppler.go`
 - Worker entrypoint: `worker/src/index.ts`
 

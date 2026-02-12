@@ -3,11 +3,14 @@ package image
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/toricodesthings/file-processing-service/internal/ocr"
 	"github.com/toricodesthings/file-processing-service/internal/types"
+	"github.com/toricodesthings/file-processing-service/internal/vision"
 )
 
 // Supported image extensions (matched case-insensitively).
@@ -48,11 +51,30 @@ func cleanOCRText(text string) string {
 	return strings.TrimSpace(text)
 }
 
-// ProcessImageOCR sends a publicly-accessible image URL to the Mistral OCR API
-// and returns cleaned markdown text. The image is NOT downloaded to disk — the
-// URL is passed directly to Mistral.
-func ProcessImageOCR(ctx context.Context, imageURL string, model string) (types.ImageExtractionResult, error) {
-	// Validate URL
+// combineOCRPages joins OCR page markdown into a single string.
+func combineOCRPages(ocrResp ocr.OCRResponse) string {
+	pageSep := "\n\n-----\n\n"
+	var parts []string
+	for _, p := range ocrResp.Pages {
+		md := strings.TrimSpace(p.Markdown)
+		if md == "" || md == "." {
+			continue
+		}
+		parts = append(parts, md)
+	}
+	return strings.Join(parts, pageSep)
+}
+
+// ProcessImage classifies an image via a cheap vision model (OpenRouter) and
+// routes to the appropriate extraction method:
+//
+//   - contentType "text"  → Mistral OCR (handwriting, documents, screenshots, …)
+//   - contentType "visual"→ vision description only (photos, artwork, …)
+//   - contentType "mixed" → OCR + vision description (diagrams, charts, …)
+//
+// If the vision classifier is unavailable, we fall back to OCR-only (current behaviour).
+func ProcessImage(ctx context.Context, imageURL, ocrModel, visionModel string, visionTimeout time.Duration) (types.ImageExtractionResult, error) {
+	// ── Validate ─────────────────────────────────────────────────────────────
 	if strings.TrimSpace(imageURL) == "" {
 		msg := "imageUrl required"
 		return types.ImageExtractionResult{Error: &msg}, errors.New(msg)
@@ -70,39 +92,113 @@ func ProcessImageOCR(ctx context.Context, imageURL string, model string) (types.
 		return types.ImageExtractionResult{Error: &msg}, errors.New(msg)
 	}
 
-	if model == "" {
-		model = "mistral-ocr-latest"
+	if ocrModel == "" {
+		ocrModel = "mistral-ocr-latest"
 	}
 
-	// Call Mistral OCR with image_url document type (no download required)
+	// ── Step 1: Vision classification (cheap, ~$0.0001) ──────────────────────
+	visionResult, visionErr := vision.RunVisionClassification(ctx, imageURL, visionModel, visionTimeout)
+	if visionErr != nil {
+		// Vision unavailable — fall back to OCR-only (preserves current behaviour)
+		fmt.Printf("[image] vision classification failed, falling back to OCR-only: %v\n", visionErr)
+		return processOCROnly(ctx, imageURL, ocrModel)
+	}
+
+	// ── Step 2: Route based on content type ──────────────────────────────────
+	switch visionResult.ContentType {
+	case "text":
+		// Text-heavy content (handwriting, docs, screenshots, whiteboards)
+		// → OCR provides the primary text; vision description is supplementary
+		ocrResult, err := runOCR(ctx, imageURL, ocrModel)
+		if err != nil {
+			// OCR failed but we still have the vision description
+			fmt.Printf("[image] OCR failed for text content, using vision description: %v\n", err)
+			return types.ImageExtractionResult{
+				Success:     true,
+				Text:        visionResult.Description,
+				Method:      "vision",
+				ImageType:   visionResult.ImageType,
+				Description: visionResult.Description,
+			}, nil
+		}
+
+		return types.ImageExtractionResult{
+			Success:     true,
+			Text:        ocrResult,
+			Method:      "ocr",
+			ImageType:   visionResult.ImageType,
+			Description: visionResult.Description,
+		}, nil
+
+	case "mixed":
+		// Significant text AND visual content (diagrams, charts, infographics)
+		// → OCR for text extraction + vision description for visual context
+		ocrResult, err := runOCR(ctx, imageURL, ocrModel)
+		if err != nil {
+			fmt.Printf("[image] OCR failed for mixed content, using vision description: %v\n", err)
+			return types.ImageExtractionResult{
+				Success:     true,
+				Text:        visionResult.Description,
+				Method:      "vision",
+				ImageType:   visionResult.ImageType,
+				Description: visionResult.Description,
+			}, nil
+		}
+
+		return types.ImageExtractionResult{
+			Success:     true,
+			Text:        ocrResult,
+			Method:      "ocr+vision",
+			ImageType:   visionResult.ImageType,
+			Description: visionResult.Description,
+		}, nil
+
+	default:
+		// "visual" or unknown — photo, artwork, no meaningful text
+		// → vision description IS the primary content
+		return types.ImageExtractionResult{
+			Success:     true,
+			Text:        visionResult.Description,
+			Method:      "vision",
+			ImageType:   visionResult.ImageType,
+			Description: visionResult.Description,
+		}, nil
+	}
+}
+
+// runOCR calls Mistral OCR and returns cleaned text.
+func runOCR(ctx context.Context, imageURL, model string) (string, error) {
 	ocrResp, err := ocr.RunMistralImageOCR(ctx, imageURL, model)
+	if err != nil {
+		return "", err
+	}
+
+	if len(ocrResp.Pages) == 0 {
+		return "", errors.New("OCR returned no pages")
+	}
+
+	raw := combineOCRPages(ocrResp)
+	cleaned := cleanOCRText(raw)
+	if cleaned == "" {
+		return "", errors.New("OCR produced empty text")
+	}
+
+	return cleaned, nil
+}
+
+// processOCROnly is the fallback path when vision is unavailable.
+// This preserves the original behaviour of the endpoint.
+func processOCROnly(ctx context.Context, imageURL, model string) (types.ImageExtractionResult, error) {
+	ocrText, err := runOCR(ctx, imageURL, model)
 	if err != nil {
 		msg := sanitiseOCRError(err)
 		return types.ImageExtractionResult{Error: &msg}, err
 	}
 
-	if len(ocrResp.Pages) == 0 {
-		msg := "no content extracted from image"
-		return types.ImageExtractionResult{Error: &msg}, errors.New(msg)
-	}
-
-	// Combine page markdown (images typically produce 1 page)
-	pageSep := "\n\n-----\n\n"
-	var parts []string
-	for _, p := range ocrResp.Pages {
-		md := strings.TrimSpace(p.Markdown)
-		if md == "" || md == "." {
-			continue
-		}
-		parts = append(parts, md)
-	}
-
-	rawText := strings.Join(parts, pageSep)
-	cleaned := cleanOCRText(rawText)
-
 	return types.ImageExtractionResult{
 		Success: true,
-		Text:    cleaned,
+		Text:    ocrText,
+		Method:  "ocr",
 	}, nil
 }
 

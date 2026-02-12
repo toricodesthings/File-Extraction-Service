@@ -15,6 +15,7 @@ type Config struct {
 	// Secrets
 	InternalSharedSecret string
 	MistralAPIKey        string
+	OpenRouterAPIKey     string
 
 	// Limits
 	MaxJSONBodyBytes int64
@@ -66,6 +67,10 @@ type Config struct {
 	DefaultPreviewMaxPages      int
 	DefaultPreviewMaxChars      int
 	DefaultPreviewNeedsOCRRatio float64
+
+	// Vision (OpenRouter) defaults
+	DefaultVisionModel   string
+	VisionRequestTimeout time.Duration
 }
 
 func Load() Config {
@@ -74,6 +79,7 @@ func Load() Config {
 
 		InternalSharedSecret: envStr("INTERNAL_SHARED_SECRET", ""),
 		MistralAPIKey:        envStr("MISTRAL_API_KEY", ""),
+		OpenRouterAPIKey:     envStr("OPENROUTER_API_KEY", ""),
 
 		MaxJSONBodyBytes: int64(envInt("MAX_JSON_BODY_BYTES", 2<<20)),
 		MaxPDFBytes:      int64(envInt("MAX_PDF_BYTES", int(200<<20))),
@@ -114,6 +120,9 @@ func Load() Config {
 		DefaultPreviewMaxPages:      envInt("DEFAULT_PREVIEW_PAGES", 8),
 		DefaultPreviewMaxChars:      envInt("DEFAULT_PREVIEW_CHARS", 20000),
 		DefaultPreviewNeedsOCRRatio: envFloat("DEFAULT_PREVIEW_NEEDS_OCR_RATIO", 0.25),
+
+		DefaultVisionModel:   envStr("DEFAULT_VISION_MODEL", "mistralai/mistral-small-3.1-24b-instruct"),
+		VisionRequestTimeout: envDur("VISION_REQUEST_TIMEOUT", 30*time.Second),
 	}
 }
 

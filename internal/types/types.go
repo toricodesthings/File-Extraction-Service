@@ -49,14 +49,17 @@ type PreviewResult struct {
 	Error          *string `json:"error,omitempty"`
 }
 
-// ── Image OCR types ──────────────────────────────────────────────────────────
+// ── Image extraction types ───────────────────────────────────────────────────
 
 type ImageExtractRequest struct {
 	ImageURL string `json:"imageUrl"`
 }
 
 type ImageExtractionResult struct {
-	Success bool    `json:"success"`
-	Text    string  `json:"text"`
-	Error   *string `json:"error,omitempty"`
+	Success     bool    `json:"success"`
+	Text        string  `json:"text"`                  // Primary text for embedding (OCR transcription OR vision description)
+	Method      string  `json:"method,omitempty"`      // "ocr" | "vision" | "ocr+vision"
+	ImageType   string  `json:"imageType,omitempty"`   // "handwriting" | "photo" | "diagram" | etc.
+	Description string  `json:"description,omitempty"` // Vision-generated description (present when vision ran)
+	Error       *string `json:"error,omitempty"`
 }
